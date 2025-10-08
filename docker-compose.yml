@@ -1,0 +1,124 @@
+version: '3.8'
+
+services:
+  # SPIRE Server
+  spire-server:
+    image: ghcr.io/spiffe/spire-server:1.8.5
+    hostname: spire-server
+    volumes:
+      - ./spire/server:/opt/spire/conf
+      - spire-server-data:/opt/spire/data
+    command: ["-config", "/opt/spire/conf/server.conf"]
+    networks:
+      - kafka-net
+    healthcheck:
+      test: ["CMD", "/opt/spire/bin/spire-server", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # SPIRE Agent for Kafka
+  spire-agent-kafka:
+    image: ghcr.io/spiffe/spire-agent:1.8.5
+    hostname: spire-agent-kafka
+    depends_on:
+      spire-server:
+        condition: service_healthy
+    volumes:
+      - ./spire/agent-kafka:/opt/spire/conf
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - spire-agent-kafka-socket:/opt/spire/sockets
+    command: ["-config", "/opt/spire/conf/agent.conf"]
+    networks:
+      - kafka-net
+
+  # SPIRE Agent for Envoy
+  spire-agent-envoy:
+    image: ghcr.io/spiffe/spire-agent:1.8.5
+    hostname: spire-agent-envoy
+    depends_on:
+      spire-server:
+        condition: service_healthy
+    volumes:
+      - ./spire/agent-envoy:/opt/spire/conf
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - spire-agent-envoy-socket:/opt/spire/sockets
+    command: ["-config", "/opt/spire/conf/agent.conf"]
+    networks:
+      - kafka-net
+
+  # Zookeeper for Kafka
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    hostname: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - kafka-net
+
+  # Kafka Broker with mTLS
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    hostname: kafka
+    depends_on:
+      - zookeeper
+      - spire-agent-kafka
+    volumes:
+      - ./kafka/config:/etc/kafka/config
+      - spire-agent-kafka-socket:/opt/spire/sockets
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: SSL://kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: SSL:SSL
+      KAFKA_SSL_KEYSTORE_LOCATION: /opt/spire/sockets/svid.p12
+      KAFKA_SSL_KEYSTORE_PASSWORD: changeit
+      KAFKA_SSL_KEY_PASSWORD: changeit
+      KAFKA_SSL_TRUSTSTORE_LOCATION: /opt/spire/sockets/bundle.p12
+      KAFKA_SSL_TRUSTSTORE_PASSWORD: changeit
+      KAFKA_SSL_CLIENT_AUTH: required
+      KAFKA_SECURITY_INTER_BROKER_PROTOCOL: SSL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    ports:
+      - "9093:9093"
+    networks:
+      - kafka-net
+
+  # Envoy Proxy
+  envoy:
+    image: envoyproxy/envoy:v1.28-latest
+    hostname: envoy
+    depends_on:
+      - kafka
+      - spire-agent-envoy
+    volumes:
+      - ./envoy/envoy.yaml:/etc/envoy/envoy.yaml
+      - spire-agent-envoy-socket:/opt/spire/sockets
+    ports:
+      - "9092:9092"  # Kafka proxy port for clients
+      - "9901:9901"  # Envoy admin interface
+    command: ["-c", "/etc/envoy/envoy.yaml"]
+    networks:
+      - kafka-net
+
+  # Example Kafka Client
+  kafka-client:
+    image: confluentinc/cp-kafka:7.5.0
+    hostname: kafka-client
+    depends_on:
+      - envoy
+    volumes:
+      - ./client/config:/etc/kafka/config
+    command: sleep infinity
+    networks:
+      - kafka-net
+
+volumes:
+  spire-server-data:
+  spire-agent-kafka-socket:
+  spire-agent-envoy-socket:
+
+networks:
+  kafka-net:
+    driver: bridge
