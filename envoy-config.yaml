@@ -1,0 +1,111 @@
+# File: envoy/envoy.yaml
+admin:
+  address:
+    socket_address:
+      address: 0.0.0.0
+      port_value: 9901
+
+static_resources:
+  listeners:
+  - name: kafka_listener
+    address:
+      socket_address:
+        address: 0.0.0.0
+        port_value: 9092
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.tcp_proxy
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+          stat_prefix: kafka_tcp
+          cluster: kafka_cluster
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+          common_tls_context:
+            tls_certificate_sds_secret_configs:
+            - name: "spiffe://example.org/envoy"
+              sds_config:
+                resource_api_version: V3
+                api_config_source:
+                  api_type: GRPC
+                  transport_api_version: V3
+                  grpc_services:
+                  - envoy_grpc:
+                      cluster_name: spire_agent
+            combined_validation_context:
+              default_validation_context:
+                match_typed_subject_alt_names:
+                - san_type: URI
+                  matcher:
+                    prefix: "spiffe://example.org/"
+              validation_context_sds_secret_config:
+                name: "spiffe://example.org"
+                sds_config:
+                  resource_api_version: V3
+                  api_config_source:
+                    api_type: GRPC
+                    transport_api_version: V3
+                    grpc_services:
+                    - envoy_grpc:
+                        cluster_name: spire_agent
+          require_client_certificate: true
+
+  clusters:
+  - name: kafka_cluster
+    connect_timeout: 5s
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: kafka_cluster
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: kafka
+                port_value: 9093
+    transport_socket:
+      name: envoy.transport_sockets.tls
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+        common_tls_context:
+          tls_certificate_sds_secret_configs:
+          - name: "spiffe://example.org/envoy"
+            sds_config:
+              resource_api_version: V3
+              api_config_source:
+                api_type: GRPC
+                transport_api_version: V3
+                grpc_services:
+                - envoy_grpc:
+                    cluster_name: spire_agent
+          combined_validation_context:
+            default_validation_context:
+              match_typed_subject_alt_names:
+              - san_type: URI
+                matcher:
+                  prefix: "spiffe://example.org/"
+            validation_context_sds_secret_config:
+              name: "spiffe://example.org"
+              sds_config:
+                resource_api_version: V3
+                api_config_source:
+                  api_type: GRPC
+                  transport_api_version: V3
+                  grpc_services:
+                  - envoy_grpc:
+                      cluster_name: spire_agent
+
+  - name: spire_agent
+    connect_timeout: 1s
+    type: STATIC
+    load_assignment:
+      cluster_name: spire_agent
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              pipe:
+                path: /opt/spire/sockets/agent.sock
